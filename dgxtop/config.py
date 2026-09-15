@@ -45,6 +45,10 @@ class AppConfig:
     log_dir: str = "/tmp/dgxtop_logs"
     log_file_enabled: bool = True
 
+    # LLM token usage monitoring (vLLM /metrics endpoint)
+    llm_enabled: bool = True
+    llm_url: str = "http://127.0.0.1:8000/metrics"
+
     def __post_init__(self):
         # Load from file first, if available
         self.load_from_file()
@@ -103,6 +107,8 @@ class AppConfig:
                     "network_interface_history": self.network_interface_history,
                     "log_dir": self.log_dir,
                     "log_file_enabled": self.log_file_enabled,
+                    "llm_enabled": self.llm_enabled,
+                    "llm_url": self.llm_url,
                 }
                 with open(path, "w", encoding="utf-8") as f:
                     json.dump(data, f, indent=4)

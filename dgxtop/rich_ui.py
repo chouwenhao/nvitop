@@ -55,6 +55,7 @@ class RichUI:
         self.mem_history: deque = deque(maxlen=40)
         self.disk_read_history: deque = deque(maxlen=40)
         self.disk_write_history: deque = deque(maxlen=40)
+        self.llm_total_rate_history: deque = deque(maxlen=40)
 
     def set_theme(self, theme_name: str):
         """Switch color theme"""
@@ -501,6 +502,79 @@ class RichUI:
             padding=(0, 1),
         )
 
+    @staticmethod
+    def _fmt_tokens(n: float) -> str:
+        """Human-readable token count."""
+        if n >= 1_000_000_000:
+            return f"{n / 1_000_000_000:,.2f}B"
+        if n >= 1_000_000:
+            return f"{n / 1_000_000:,.2f}M"
+        if n >= 1_000:
+            return f"{n / 1_000:,.1f}k"
+        return f"{n:,.0f}"
+
+    def _build_llm_panel(self, stats: Dict[str, Any]) -> Panel:
+        """Build LLM token usage panel from vLLM /metrics counters."""
+        llm = stats.get("llm")
+        if llm is None or not getattr(llm, "ok", False):
+            detail = getattr(llm, "error", "") if llm else "disabled"
+            url = getattr(self.config, "llm_url", "")
+            content = Text()
+            content.append("LLM endpoint unreachable\n", style="bold red")
+            content.append(f"{url}\n", style="dim")
+            if detail:
+                content.append(detail[:60], style="dim")
+            return Panel(
+                content,
+                title="[bold]LLM Tokens[/bold]",
+                border_style="bold red",
+                padding=(0, 1),
+            )
+
+        total_rate = llm.total_tokens_per_sec
+        self.llm_total_rate_history.append(total_rate)
+
+        lines = []
+
+        total_text = Text()
+        total_text.append("Total:   ", style="dim")
+        total_text.append(
+            f"{self._fmt_tokens(llm.total_tokens)} tokens", style=self.theme["primary"]
+        )
+        lines.append(total_text)
+
+        split_text = Text()
+        split_text.append("Prompt:  ", style="dim")
+        split_text.append(self._fmt_tokens(llm.prompt_tokens), style=self.theme["primary"])
+        split_text.append("  Gen: ", style="dim")
+        split_text.append(self._fmt_tokens(llm.generation_tokens), style=self.theme["primary"])
+        lines.append(split_text)
+
+        rate_text = Text()
+        rate_text.append("Speed:   ", style="dim")
+        rate_text.append(
+            f"{self._fmt_tokens(llm.generation_tokens_per_sec)} tok/s gen",
+            style=self.theme["primary"],
+        )
+        lines.append(rate_text)
+
+        spark = self._make_sparkline(self.llm_total_rate_history)
+        spark_text = Text()
+        spark_text.append("Rate:  ", style="dim")
+        spark_text.append(spark, style=self.theme["primary"])
+        spark_text.append(f" {total_rate:.0f} tok/s", style=self.theme["primary"])
+        lines.append(spark_text)
+
+        model = llm.model or "unknown model"
+        lines.append(Text(model[:44], style="dim"))
+
+        return Panel(
+            Group(*lines),
+            title="[bold]LLM Tokens[/bold]",
+            border_style=self.theme["primary"],
+            padding=(0, 1),
+        )
+
     def build_layout(self, stats: Dict[str, Any]) -> Layout:
         """Build the complete UI layout"""
         layout = Layout()
@@ -539,13 +613,15 @@ class RichUI:
         layout["memory"].update(self._build_memory_panel(stats))
         layout["disk_history"].update(self._build_disk_history_panel(stats))
 
-        # I/O tables row: Disk | Network (side by side)
+        # I/O tables row: Disk | Network | LLM Tokens (side by side)
         layout["io_tables"].split_row(
             Layout(name="disk_table"),
             Layout(name="network_table"),
+            Layout(name="llm_table"),
         )
         layout["disk_table"].update(self._build_disk_table(stats))
         layout["network_table"].update(self._build_network_table(stats))
+        layout["llm_table"].update(self._build_llm_panel(stats))
 
         # Processes row
         layout["processes"].update(self._build_processes_table(stats))
