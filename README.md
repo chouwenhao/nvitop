@@ -11,6 +11,7 @@ A performance monitoring CLI tool for Ubuntu inspired by asitop for Mac, with ad
 - **Volume Transfer Speed Monitoring**: Real-time read/write speed tracking per drive
 - **System Monitoring**: GB10 GPU, CPU, memory, and network statistics
 - **Process Monitoring**: Live tracking of top resource-consuming processes, sorted by CPU, Memory, Read, or Write rates
+- **LLM Token Usage**: Real-time prompt/generation token totals and throughput, read from the vLLM Prometheus `/metrics` endpoint (zero instrumentation)
 - **Alerting Thresholds**: Highly visual red/yellow system alerts when CPU, Memory, GPU, or Disk latency limits are exceeded
 - **Configurable Options**: Multi-level configuration file support (`~/.config/dgxtop/config.json`)
 - **Systemd Daemon Mode**: Install as a service to log background performance metrics automatically
@@ -54,6 +55,8 @@ dgxtop -n eth0                         # Monitor specific network interface
 dgxtop --log-level DEBUG               # Set logging level (DEBUG, INFO, etc.)
 dgxtop --log-dir /var/log/dgxtop       # Custom directory to save logs
 dgxtop --sort-processes memory         # Set process sorting method (cpu, memory, read, write)
+dgxtop --llm-url URL                   # Custom vLLM metrics URL for LLM token usage (default: http://127.0.0.1:8000/metrics)
+dgxtop --no-llm                        # Hide the LLM token usage panel
 dgxtop --version                       # Show version information
 ```
 
@@ -181,6 +184,7 @@ While inspired by the original asitop for Mac, this DGX Spark version:
 - **磁碟傳輸速度監控**：即時追蹤每個硬碟的讀取/寫入速度
 - **系統監控**：GB10 GPU、CPU、記憶體及網路統計數據
 - **行程監控**：追蹤佔用資源最高的前幾個行程，可自訂依 CPU、記憶體、讀取或寫入速度排序
+- **LLM Token 用量監控**：即時顯示 prompt／generation token 累計量與吞吐速率，直接讀取 vLLM 的 Prometheus `/metrics` 端點（免插樁）
 - **警告閾值**：當 CPU、記憶體、GPU 使用率或磁碟等待時間超過自訂上限時，自動於畫面上顯示警告
 - **設定檔支援**：支援讀取自訂 JSON 設定檔 (`~/.config/dgxtop/config.json`)
 - **Systemd 服務與守護行程**：支援以背景守護行程 (Daemon) 執行，自動將系統數據寫入日誌檔
@@ -224,6 +228,8 @@ dgxtop -n eth0                         # 監控指定的網路介面
 dgxtop --log-level DEBUG               # 設定日誌等級 (DEBUG, INFO 等)
 dgxtop --log-dir /var/log/dgxtop       # 設定自訂日誌目錄
 dgxtop --sort-processes memory         # 設定行程排序方式 (cpu, memory, read, write)
+dgxtop --llm-url URL                   # 自訂 vLLM metrics URL 以顯示 LLM token 用量 (預設 http://127.0.0.1:8000/metrics)
+dgxtop --no-llm                        # 隱藏 LLM token 用量面板
 dgxtop --version                       # 顯示版本資訊
 ```
 

@@ -24,6 +24,7 @@ from system_monitor import SystemMonitor
 from disk_monitor import DiskMonitor
 from network_monitor import NetworkMonitor
 from process_monitor import ProcessMonitor
+from llm_monitor import LLMMonitor
 from rich_ui import RichUI
 from logger import get_logger, log_system_info
 
@@ -40,6 +41,7 @@ class DGXTop:
         self.disk_monitor = DiskMonitor()
         self.network_monitor = NetworkMonitor(self.config)
         self.process_monitor = ProcessMonitor()
+        self.llm_monitor = LLMMonitor(self.config.llm_url) if self.config.llm_enabled else None
         self.ui = RichUI(self.config)
         
         # Configure logging directory and level from AppConfig
@@ -113,6 +115,16 @@ class DGXTop:
             sort_by=self.config.process_sort_by
         )
         stats["processes"] = process_stats
+
+        # LLM token usage (optional)
+        if self.llm_monitor is not None:
+            try:
+                llm_stats = self.llm_monitor.get_stats()
+                if llm_stats is not None:
+                    stats["llm"] = llm_stats
+                    stats["llm_history"] = self.llm_monitor.get_history()
+            except Exception as e:
+                self.logger.log_error(e, "LLM stats collection")
 
         return stats
 
@@ -347,6 +359,18 @@ def main():
         help="Process list sorting",
     )
     parser.add_argument(
+        "--llm-url",
+        type=str,
+        default=None,
+        metavar="URL",
+        help="Prometheus metrics URL to show LLM token usage (default: http://127.0.0.1:8000/metrics)",
+    )
+    parser.add_argument(
+        "--no-llm",
+        action="store_true",
+        help="Disable LLM token usage panel",
+    )
+    parser.add_argument(
         "-v", "--version",
         action="version",
         version=f"dgxtop {__version__}",
@@ -379,6 +403,11 @@ def main():
             config.log_dir = args.log_dir
         if args.sort_processes is not None:
             config.process_sort_by = args.sort_processes
+        if args.llm_url is not None:
+            config.llm_url = args.llm_url
+            config.llm_enabled = True
+        if args.no_llm:
+            config.llm_enabled = False
 
         app = DGXTop(config=config, daemon_mode=args.daemon)
         app.run()
