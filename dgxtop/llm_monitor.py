@@ -17,8 +17,10 @@ from typing import Dict, Optional
 
 # Counter samples look like:
 #   vllm:prompt_tokens_total{engine="0",model_name="llama-3-8b"} 1.2205153e+07
+#   velogb10_prompt_tokens_total 1.2205153e+07          (veloGB10, no labels)
 _COUNTER_RE = re.compile(
-    r'^vllm:(?P<kind>prompt|generation)_tokens_total\{(?P<labels>[^}]*)\}\s+(?P<value>[0-9eE.+-]+)',
+    r'^(?:vllm:|velogb10_)(?P<kind>prompt|generation)_tokens_total'
+    r'(?:\{(?P<labels>[^}]*)\})?\s+(?P<value>[0-9eE.+-]+)',
     re.MULTILINE,
 )
 _MODEL_RE = re.compile(r'model_name="([^"]+)"')
@@ -49,6 +51,7 @@ class LLMMonitor:
         self._last_counters: Optional[Dict[str, float]] = None
         self._last_time: Optional[float] = None
         self._model: str = ""
+        self._model_tried: bool = False
         self.gen_rate_history: deque = deque(maxlen=history_length)
         self.total_rate_history: deque = deque(maxlen=history_length)
         self._last_error: Optional[str] = None
@@ -63,6 +66,22 @@ class LLMMonitor:
             self._last_error = str(e)
             return None
 
+    def _discover_model(self) -> str:
+        """One-shot GET of the sibling /v1/models endpoint for the model name
+        (servers like veloGB10 expose counters without a model_name label)."""
+        base = self.url.rsplit("/metrics", 1)[0].rstrip("/")
+        try:
+            req = urllib.request.Request(base + "/v1/models")
+            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                import json
+
+                data = json.load(resp).get("data") or []
+                if data:
+                    return data[0].get("id", "")
+        except Exception:  # noqa: BLE001 - cosmetic field, never fatal
+            pass
+        return ""
+
     def _parse_counters(self, text: str) -> Optional[Dict[str, float]]:
         """Sum token counters across engines. Returns None when absent."""
         prompt = generation = 0.0
@@ -76,12 +95,15 @@ class LLMMonitor:
             else:
                 generation += value
             if not model:
-                lm = _MODEL_RE.search(m.group("labels"))
+                lm = _MODEL_RE.search(m.group("labels") or "")
                 if lm:
                     model = lm.group(1)
         if not found:
-            self._last_error = "vllm token counters not found"
+            self._last_error = "token counters not found"
             return None
+        if not model and not self._model_tried:
+            self._model_tried = True
+            model = self._discover_model()
         self._model = model
         return {"prompt": prompt, "generation": generation}
 
