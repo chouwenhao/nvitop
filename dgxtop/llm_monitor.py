@@ -18,12 +18,32 @@ from typing import Dict, Optional
 # Counter samples look like:
 #   vllm:prompt_tokens_total{engine="0",model_name="llama-3-8b"} 1.2205153e+07
 #   velogb10_prompt_tokens_total 1.2205153e+07          (veloGB10, no labels)
+#   tensorfold:prompt_tokens_total 1.2205153e+07        (TensorFold zig engine)
 _COUNTER_RE = re.compile(
-    r'^(?:vllm:|velogb10_)(?P<kind>prompt|generation)_tokens_total'
+    r'^(?:vllm:|velogb10_|tensorfold:)(?P<kind>prompt|generation)_tokens_total'
     r'(?:\{(?P<labels>[^}]*)\})?\s+(?P<value>[0-9eE.+-]+)',
     re.MULTILINE,
 )
 _MODEL_RE = re.compile(r'model_name="([^"]+)"')
+# True LIVE generation speed for veloGB10: its *_tokens_total counters and the
+# decode histogram only commit when a request FINISHES, so nothing token-based
+# moves mid-generation. The scheduler step gauge does: each decode step emits
+# ~1+avg-accepted tokens (MTP speculative decoding). speed = d(steps)/dt *
+# (spec_emitted_total / steps_total) tracks instant throughput. vLLM exposes
+# neither, so token deltas remain the primary source everywhere.
+_STEPS_RE = re.compile(r'^velogb10_scheduler_steps_total\s+([0-9eE.+-]+)', re.MULTILINE)
+_EMIT_RE = re.compile(r'^velogb10_spec_emitted_tokens_total\s+([0-9eE.+-]+)', re.MULTILINE)
+_GEN_RE = re.compile(r'^velogb10_generation_tokens_total\s+([0-9eE.+-]+)', re.MULTILINE)
+_DECODE_SUM_RE = re.compile(r'^velogb10_decode_tokens_per_second_sum\s+([0-9eE.+-]+)', re.MULTILINE)
+_DECODE_COUNT_RE = re.compile(r'^velogb10_decode_tokens_per_second_count\s+([0-9eE.+-]+)', re.MULTILINE)
+_RUNNING_RE = re.compile(r'^(?:velogb10_requests_running|tensorfold:requests_running)'
+                         r'(?:\{[^}]*\})?\s+([0-9eE.+-]+)', re.MULTILINE)
+# TensorFold: totals commit at request finish too; tensorfold:decode_rounds_total
+# advances per decode round, so d(rounds)/dt * (generation_total / rounds_total)
+# is the live speed, same trick as veloGB10's step gauge.
+_TF_ROUNDS_RE = re.compile(r'^tensorfold:decode_rounds_total\s+([0-9eE.+-]+)', re.MULTILINE)
+_TF_GENTOK_RUN_RE = re.compile(
+    r'^tensorfold:generation_tokens_running(?:\{[^}]*\})?\s+([0-9eE.+-]+)', re.MULTILINE)
 
 
 @dataclass
@@ -52,6 +72,9 @@ class LLMMonitor:
         self._last_time: Optional[float] = None
         self._model: str = ""
         self._model_tried: bool = False
+        self._decode_hist = None
+        self._decode_ema = None
+        self._decode_time = None
         self.gen_rate_history: deque = deque(maxlen=history_length)
         self.total_rate_history: deque = deque(maxlen=history_length)
         self._last_error: Optional[str] = None
@@ -107,6 +130,58 @@ class LLMMonitor:
         self._model = model
         return {"prompt": prompt, "generation": generation}
 
+    def _decode_live(self, text: str, now: float):
+        """True instant generation tokens/s for veloGB10, or None (vLLM etc.).
+
+        All token-ish totals on veloGB10 commit only when a request finishes,
+        so any token-delta rate is flat between requests. The scheduler step
+        counter DOES advance continuously while decoding (~d steps/s), and each
+        step emits on average emit_total/steps_total tokens under MTP
+        speculative decoding. Instant speed therefore is
+            d(steps)/dt * (emit_total / steps_total)
+        smoothed with an EMA. Histogram deltas (fast requests committing
+        between polls) refine the estimate when available."""
+        st = _STEPS_RE.search(text)
+        tf = None if st else _TF_ROUNDS_RE.search(text)
+        if not st and not tf:
+            return None
+        if st:
+            # veloGB10: step counter moves continuously during decode.
+            qty = float(st.group(1))
+            em = _EMIT_RE.search(text)
+            emit = float(em.group(1)) if em else None
+        else:
+            # TensorFold commits every *_total at request finish (rounds too),
+            # but tensorfold:generation_tokens_running — tokens currently held
+            # by live streams, incl. in-flight drafts — moves every round.
+            # d(running)/dt is the live token production rate directly.
+            run_t = _TF_GENTOK_RUN_RE.search(text)
+            qty = float(run_t.group(1)) if run_t else 0.0
+            emit = None  # qty is already in tokens: multiplier 1
+        r = _RUNNING_RE.search(text)
+        running = float(r.group(1)) if r else 0.0
+
+        inst = None
+        elapsed = now - self._decode_time if self._decode_time is not None else 0.0
+        if self._decode_hist is not None and elapsed > 0:
+            prev = self._decode_hist[0]
+            d = qty - prev
+            if d >= 0:
+                if emit is not None and qty > 0:
+                    inst = (d / elapsed) * (emit / qty)
+                else:
+                    inst = d / elapsed
+        self._decode_hist = (qty, emit)
+        self._decode_time = now
+        if inst is not None:
+            self._decode_ema = (inst if self._decode_ema is None
+                                else 0.3 * inst + 0.7 * self._decode_ema)
+        if running <= 0:
+            # Nothing generating: no live speed claim; keep EMA state so the
+            # very first sample of the next request isn't blind.
+            return None
+        return self._decode_ema
+
     def get_stats(self) -> Optional[LLMStats]:
         """Poll metrics once and return current snapshot (None if never polled)."""
         now = time.time()
@@ -148,6 +223,14 @@ class LLMMonitor:
         else:
             # First sample after start-up, or counter reset (server restart).
             p_rate = g_rate = 0.0
+
+        # veloGB10 commits generation/prompt *_tokens_total only when a request
+        # FINISHES, so delta rates stay 0 for the whole decoding phase. While a
+        # request is running, use the server's continuously-moving step gauge.
+        if text is not None:
+            live_mean = self._decode_live(text, now)
+            if live_mean is not None:
+                g_rate = max(g_rate, live_mean)
 
         self._last_counters = counters
         self._last_time = now
