@@ -7,6 +7,7 @@ aggregates cumulative prompt/generation token counters with per-second rates.
 Works entirely over HTTP with stdlib only — no extra dependencies.
 """
 
+import os
 import re
 import time
 import urllib.request
@@ -65,8 +66,13 @@ class LLMStats:
 class LLMMonitor:
     """Poll an LLM server's Prometheus metrics and expose token usage."""
 
-    def __init__(self, url: str = "http://127.0.0.1:8000/metrics", history_length: int = 40):
+    def __init__(self, url: str = "http://127.0.0.1:8000/metrics", history_length: int = 40,
+                 api_key: str = ""):
         self.url = url
+        # Bearer token for servers that gate /metrics behind an API key
+        # (e.g. TensorFold with TENSORFOLD_API_KEY set). Env fallback lets
+        # packaged binaries authenticate without config changes.
+        self.api_key = api_key or os.environ.get("DGXTOP_LLM_API_KEY", "")
         self.timeout = 3
         self._last_counters: Optional[Dict[str, float]] = None
         self._last_time: Optional[float] = None
@@ -79,10 +85,16 @@ class LLMMonitor:
         self.total_rate_history: deque = deque(maxlen=history_length)
         self._last_error: Optional[str] = None
 
+    def _auth_header(self, headers):
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+        return headers
+
     def _fetch_text(self) -> Optional[str]:
         """GET the metrics URL; None on failure."""
         try:
-            req = urllib.request.Request(self.url, headers={"Accept": "text/plain"})
+            req = urllib.request.Request(self.url,
+                                         headers=self._auth_header({"Accept": "text/plain"}))
             with urllib.request.urlopen(req, timeout=self.timeout) as resp:
                 return resp.read().decode("utf-8", errors="replace")
         except Exception as e:  # noqa: BLE001 - surface any transport error
@@ -94,7 +106,8 @@ class LLMMonitor:
         (servers like veloGB10 expose counters without a model_name label)."""
         base = self.url.rsplit("/metrics", 1)[0].rstrip("/")
         try:
-            req = urllib.request.Request(base + "/v1/models")
+            req = urllib.request.Request(base + "/v1/models",
+                                         headers=self._auth_header({}))
             with urllib.request.urlopen(req, timeout=self.timeout) as resp:
                 import json
 

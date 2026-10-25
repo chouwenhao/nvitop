@@ -41,7 +41,8 @@ class DGXTop:
         self.disk_monitor = DiskMonitor()
         self.network_monitor = NetworkMonitor(self.config)
         self.process_monitor = ProcessMonitor()
-        self.llm_monitor = LLMMonitor(self.config.llm_url) if self.config.llm_enabled else None
+        self.llm_monitor = LLMMonitor(self.config.llm_url,
+                                      api_key=self.config.llm_api_key) if self.config.llm_enabled else None
         self.ui = RichUI(self.config)
         
         # Configure logging directory and level from AppConfig
