@@ -48,6 +48,7 @@ class AppConfig:
     # LLM token usage monitoring (vLLM /metrics endpoint)
     llm_enabled: bool = True
     llm_url: str = "http://127.0.0.1:8000/metrics"
+    llm_api_key: str = ""  # Bearer token when the server gates /metrics (TensorFold)
 
     def __post_init__(self):
         # Load from file first, if available
